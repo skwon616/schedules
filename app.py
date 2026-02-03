@@ -52,10 +52,10 @@ def parse_select_from(text: str):
 # =========================
 def fetch_db():
     # DB에서 전부 가져오기 (규모 커지면 날짜 범위 필터 권장)
-    res = sb.table("schedule_cells").select("team,shift_type,work_date,cell_value").execute()
+    res = sb.table("schedule_cells").select("team,shift_type,row_no,work_date,cell_value").execute()
     rows = res.data or []
     if not rows:
-        return pd.DataFrame(columns=["team", "shift_type", "work_date", "cell_value"])
+        return pd.DataFrame(columns=["team", "shift_type", "row_no", "work_date", "cell_value"])
     df = pd.DataFrame(rows)
     df["work_date"] = pd.to_datetime(df["work_date"]).dt.date
     return df
@@ -108,6 +108,7 @@ def seed_from_excel(excel_df: pd.DataFrame):
             payload.append({
                 "team": team,
                 "shift_type": shift_type,
+                "row_no": int(i),
                 "work_date": work_date.isoformat(),
                 "cell_value": str(v)
             })
@@ -119,7 +120,7 @@ def seed_from_excel(excel_df: pd.DataFrame):
     for k in range(0, len(payload), BATCH):
         sb.table("schedule_cells").upsert(
             payload[k:k+BATCH],
-            on_conflict="team,shift_type,work_date"
+            on_conflict="team,shift_type,row_no,work_date"
         ).execute()
 
 def to_pivot(db_df: pd.DataFrame):
@@ -132,7 +133,7 @@ def to_pivot(db_df: pd.DataFrame):
     if db_df.empty:
         return pd.DataFrame()
     pv = db_df.pivot_table(
-        index=["team", "shift_type"],
+        index=["team", "shift_type","row_no"],
         columns="work_date",
         values="cell_value",
         aggfunc="first",
@@ -143,13 +144,14 @@ def to_pivot(db_df: pd.DataFrame):
     pv = pv.reindex(sorted(pv.columns), axis=1)
     return pv
 
-def db_update_cell(team: str, shift_type: str, work_date: date, new_value: str):
+def db_update_cell(team: str, shift_type: str, row_no: int, work_date: date, new_value: str):
     sb.table("schedule_cells").upsert({
         "team": team,
         "shift_type": shift_type,
+        "row_no": int(row_no),
         "work_date": work_date.isoformat(),
         "cell_value": new_value
-    }, on_conflict="team,shift_type,work_date").execute()
+    }, on_conflict="team,shift_type,row_no,work_date").execute()
 
 # =========================
 # 3) DB 로드 / 비어있으면 Seed 안내
@@ -171,6 +173,9 @@ if db_df.empty:
 pv = to_pivot(db_df)
 date_cols = list(pv.columns)
 row_keys = list(pv.index)  # (team, shift_type)
+row_labels = [f"{t} | {s} | row {rn}" for (t, s, rn) in row_keys]
+
+db_update_cell(team, shift_type, row_no, work_date, chosen)
 
 # =========================
 # 4) UI
