@@ -130,28 +130,43 @@ def db_upsert(team: str, shift_type: str, category: str, row_no: int, work_date:
 # 3) 최초 1회 seed (schedule.xlsx 구조 기준)
 # =========================================================
 def seed_from_excel(excel_df: pd.DataFrame):
-    # 🔴 여기서 실제 엑셀 헤더명에 맞게만 바꿔주면 끝
-    COL_TEAM  = excel_df.columns[0]   # 예: "관제소"
-    COL_SHIFT = excel_df.columns[1]   # 예: "근무형태"
-    COL_CAT   = excel_df.columns[2]   # 예: "구분" (근무자/결원/대근자)
+    """
+    엑셀 구조 가정:
+    [0] 관제소(team)
+    [1] 근무형태(shift)  → Day / Night / 주간 / 야간
+    [2] 구분(category)  → 근무자 / 결원 / 대근자 (병합셀 가능)
+    [3:] 날짜 컬럼
+    """
 
-    teams  = excel_df[COL_TEAM].ffill().astype(str)
+    if excel_df.shape[1] < 4:
+        raise ValueError("엑셀은 최소 4개 컬럼(관제소, 근무형태, 구분, 날짜...)이 필요합니다.")
+
+    # ✅ 컬럼 지정 (이게 빠져서 에러났음)
+    c_team  = excel_df.columns[0]
+    c_shift = excel_df.columns[1]   # ← 이 줄이 핵심
+    c_cat   = excel_df.columns[2]
+
+    # ✅ 병합셀 대비 ffill
+    teams  = excel_df[c_team].ffill().astype(str)
     shifts = excel_df[c_shift].ffill().astype(str)
-    cats = excel_df[c_cat].ffill().astype(str)   # ← category도 병합 대비 ffill
+    cats   = excel_df[c_cat].ffill().astype(str)
 
-    # 날짜 컬럼은 4번째부터
+    # 날짜 컬럼 찾기
     date_cols = []
     for c in excel_df.columns[3:]:
         try:
             date_cols.append(pd.to_datetime(c))
-        except:
+        except Exception:
             pass
+
+    if not date_cols:
+        raise ValueError("날짜 컬럼을 찾지 못했습니다. (4번째 컬럼부터 날짜 헤더 필요)")
 
     payload = []
     for i in range(len(excel_df)):
         team = teams.iat[i].strip()
-        shift_type = norm_shift(str(shifts.iat[i]))
-        category = norm_cat(str(cats.iat[i]))
+        shift_type = norm_shift(shifts.iat[i])
+        category = norm_cat(cats.iat[i])
 
         for dc in date_cols:
             v = excel_df.at[i, dc]
@@ -163,6 +178,16 @@ def seed_from_excel(excel_df: pd.DataFrame):
                 "work_date": dc.date().isoformat(),
                 "cell_value": "" if pd.isna(v) else str(v)
             })
+
+    if not payload:
+        raise ValueError("Seed 대상 데이터가 0건입니다. 엑셀 구조를 확인하세요.")
+
+    # 중복 제거 (안전)
+    dedup = {}
+    for r in payload:
+        k = (r["team"], r["shift_type"], r["category"], r["row_no"], r["work_date"])
+        dedup[k] = r
+    payload = list(dedup.values())
 
     sb.table("schedule_cells").upsert(
         payload,
