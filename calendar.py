@@ -33,13 +33,11 @@ PAIR_BY_LETTER = {
 DAY_RULE = {"A": "B", "B": "C", "C": "D", "D": "A"}
 NIGHT_RULE = {"A": "D", "B": "A", "C": "B", "D": "C"}
 
-
 # =========================================================
 # 1) Streamlit 기본 설정
 # =========================================================
 st.set_page_config(layout="wide", page_title=APP_TITLE)
 st.title(APP_TITLE)
-
 
 # =========================================================
 # 2) Secrets / Supabase 클라이언트
@@ -47,18 +45,21 @@ st.title(APP_TITLE)
 def get_secret(key: str) -> str:
     v = st.secrets.get(key)
     if v is None or str(v).strip() == "":
-        st.error(f"Streamlit Secrets에 '{key}' 값이 없습니다.")
+        st.error(
+            f"Streamlit Secrets에 '{key}' 값이 없습니다.\n\n"
+            f"Cloud: App Settings → Secrets\n"
+            f"Local: .streamlit/secrets.toml"
+        )
         st.stop()
     return str(v).strip()
     
 SUPABASE_URL = "https://rorgbvvlwdnpjfltxtvj.supabase.co"
 SUPABASE_KEY = "sb_publishable_xbWeDQ_2Ja8u2yQRFWFprg_dfLHyw4h"
-SUPABASE_SERVICE_KEY = "sb_secret_HZXy1kBPapoPjMTSsTWqQQ_mAHc8SO_"
+SUPABASE_SERVICE_KEY = "sb_secret_LJT8BMgUyzdMzk2v8JAk-g_CJrd2DDk"
 
 # 일반(앱) / 관리자(seed) 분리
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 supabase_admin = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-
 
 # =========================================================
 # 3) 유틸: 룰 / 후보 생성
@@ -77,6 +78,16 @@ def members_of_groups(group_codes: list[str]) -> list[str]:
         s |= set(GROUPS.get(g, set()))
     return sorted(s)
 
+def effective_workers(group_code: str, vacancy: str | None, substitute: str | None) -> list[str]:
+    """
+    요구사항 2) 결원은 근무자 리스트에서 빠지고 대근자는 추가
+    """
+    base = set(GROUPS.get(group_code, set()))
+    if vacancy:
+        base.discard(vacancy)
+    if substitute:
+        base.add(substitute)
+    return sorted(base)
 
 # =========================================================
 # 4) Supabase IO
@@ -108,7 +119,6 @@ def upsert_assignment(template_key: str, day: int, shift: str, period: str,
         "substitute_name": substitute_name,
     }
     supabase.table("shift_assignment").upsert(payload).execute()
-
 
 # =========================================================
 # 5) Seed: 업로드된 엑셀을 월 전체로 파싱하여 shift_template upsert
@@ -203,7 +213,6 @@ def seed_from_excel_bytes(uploaded_file) -> int:
     supabase_admin.table("shift_template").upsert(records).execute()
     return len(records)
 
-
 # =========================================================
 # 6) 업로드/seed UI (항상 렌더 전에 실행 + 성공 시 rerun)
 # =========================================================
@@ -214,13 +223,13 @@ with st.expander("템플릿 업로드/적재 (calendar.xlsx)", expanded=True):
             try:
                 n = seed_from_excel_bytes(uploaded)
                 st.success(f"shift_template upsert 완료: {n} rows")
-                st.rerun()  # 🔥 seed 후 즉시 화면 갱신(다음 단계 렌더 보장)
+                st.rerun()
             except Exception as e:
                 st.error(f"seed 실패: {type(e).__name__} | {e}")
                 st.stop()
 
 # =========================================================
-# 7) 템플릿 로드 → 없으면 중단 (드롭다운이 안 생기는 핵심 방지 로직)
+# 7) 템플릿 로드 → 없으면 중단
 # =========================================================
 template_rows = load_template(TEMPLATE_KEY)
 if not template_rows:
@@ -235,124 +244,166 @@ days = sorted({r["day_of_month"] for r in template_rows})
 # 템플릿 맵: (day, shift, period) -> group_code
 tmpl_map = {(r["day_of_month"], r["shift"], r["period"]): r["group_code"] for r in template_rows}
 
-# 그날 이미 등록된 대근자 set (조건 4)
-subs_used_by_day: dict[int, set[str]] = {d: set() for d in days}
-for (d, sh, p), a in assign_map.items():
-    sub = a.get("substitute_name")
-    if sub:
-        subs_used_by_day.setdefault(d, set()).add(sub)
-
+# =========================================================
+# 8) 모드: 입력 화면 ↔ 미리보기 화면
+# =========================================================
+if "mode" not in st.session_state:
+    st.session_state.mode = "input"  # input | preview
 
 # =========================================================
-# 8) 렌더 블록: (T1/T2) x (day/night)
-#     행 3개: 근무자 / 결원 / 대근자
+# 9) 입력 화면 (두번째 사진 스타일)
+# =========================================================
+def input_page():
+    st.header("교대 결원/대근 입력")
+
+    day = st.selectbox("날짜", options=days, index=0)
+    period_ui = st.selectbox(
+        "주/야",
+        options=["day", "night"],
+        format_func=lambda x: "Day" if x == "day" else "Night",
+        index=0
+    )
+
+    # 같은 날짜 내 대근자 중복 제외용(입력 화면에서도 적용)
+    # 현재 DB 기준으로 그날 이미 선택된 대근자
+    used_subs = set()
+    for (d, sh, p), a in assign_map.items():
+        if d == day and p == period_ui:
+            if a.get("substitute_name"):
+                used_subs.add(a["substitute_name"])
+
+    col1, col2 = st.columns(2)
+
+    for shift, col in [("T1", col1), ("T2", col2)]:
+        with col:
+            st.subheader(f"{shift} | {'Day' if period_ui=='day' else 'Night'}")
+            key = (day, shift, period_ui)
+            g = tmpl_map.get(key)
+
+            if not g:
+                st.info("해당 템플릿 셀이 없습니다.")
+                continue
+
+            base_members = sorted(GROUPS.get(g, set()))
+            st.caption(f"근무조: {g}")
+            st.write("근무자(원본):", " · ".join(base_members))
+
+            a = assign_map.get(key, {})
+            cur_vac = a.get("vacancy_name")
+            cur_sub = a.get("substitute_name")
+
+            # 결원: 해당 그룹에서만
+            vac_options = [""] + base_members
+            vac = st.selectbox(
+                f"{shift} 결원",
+                options=vac_options,
+                index=vac_options.index(cur_vac) if cur_vac in vac_options else 0,
+                key=f"in_vac_{day}_{period_ui}_{shift}"
+            )
+            vac_val = vac if vac != "" else None
+
+            # 대근: 룰 기반 + 그날 중복 제외
+            cand_groups = substitute_candidate_groups(g, period_ui)
+            candidates = members_of_groups(cand_groups)
+
+            # (옵션) 결원 본인은 대근 후보에서 제외
+            if vac_val:
+                candidates = [x for x in candidates if x != vac_val]
+
+            # 같은 날 다른 셀에서 이미 대근으로 선택된 이름 제외 (조건 4)
+            # 단, 현재 셀에 이미 선택된 값은 유지
+            filtered = [x for x in candidates if (x not in used_subs) or (x == cur_sub)]
+
+            sub_options = [""] + filtered
+            sub = st.selectbox(
+                f"{shift} 대근",
+                options=sub_options,
+                index=sub_options.index(cur_sub) if cur_sub in sub_options else 0,
+                key=f"in_sub_{day}_{period_ui}_{shift}"
+            )
+            sub_val = sub if sub != "" else None
+
+            # 저장
+            if st.button(f"{shift} 저장", key=f"in_save_{day}_{period_ui}_{shift}"):
+                upsert_assignment(TEMPLATE_KEY, day, shift, period_ui, vac_val, sub_val)
+                st.success("저장 완료")
+                st.rerun()
+
+            # 보정 근무자 미리보기(입력 화면에서도 보여주기)
+            eff = effective_workers(g, vac_val, sub_val)
+            st.write("근무자(보정):", " · ".join(eff))
+
+    if st.button("미리보기 출력"):
+        st.session_state.mode = "preview"
+        st.rerun()
+
+# =========================================================
+# 10) 미리보기 렌더
 # =========================================================
 def render_block(shift: str, period: str, block_title: str):
     st.subheader(block_title)
 
-    # 헤더
     cols = st.columns([1] + [1]*len(days))
     cols[0].markdown("**구분 / 날짜**")
     for i, d in enumerate(days):
         cols[i+1].markdown(f"**{d}일**")
 
-    # (1) 근무자: 그룹 조원 전체 표시 (조건 1)
+    # (1) 근무자: 결원 제거 + 대근 추가 반영
     row1 = st.columns([1] + [1]*len(days))
     row1[0].markdown("**근무자**")
     for i, d in enumerate(days):
         g = tmpl_map.get((d, shift, period))
         if not g:
-            row1[i+1].markdown("-")
+            row1[i+1].markdown("•")
             continue
-        members = sorted(GROUPS.get(g, set()))
+        a = assign_map.get((d, shift, period), {})
+        vac = a.get("vacancy_name")
+        sub = a.get("substitute_name")
+        members = effective_workers(g, vac, sub)
         row1[i+1].markdown("<br/>".join(members), unsafe_allow_html=True)
 
-    # (2) 결원: 해당 그룹에서만 선택 (조건 2)
+    # (2) 결원: 읽기 전용 표시
     row2 = st.columns([1] + [1]*len(days))
     row2[0].markdown("**결원**")
     for i, d in enumerate(days):
         g = tmpl_map.get((d, shift, period))
-        key = (d, shift, period)
-        a = assign_map.get(key, {})
-        current_vac = a.get("vacancy_name")
-
         if not g:
-            row2[i+1].markdown("-")
+            row2[i+1].markdown("•")
             continue
+        a = assign_map.get((d, shift, period), {})
+        row2[i+1].markdown(a.get("vacancy_name") or "")
 
-        options = [""] + sorted(GROUPS.get(g, set()))
-        vac = row2[i+1].selectbox(
-            label=f"vac_{shift}_{period}_{d}",
-            options=options,
-            index=options.index(current_vac) if current_vac in options else 0,
-            label_visibility="collapsed"
-        )
-
-        vac_val = vac if vac != "" else None
-        sub_val = a.get("substitute_name") if a else None
-
-        if vac_val != current_vac:
-            upsert_assignment(TEMPLATE_KEY, d, shift, period, vac_val, sub_val)
-            assign_map[key] = {
-                "template_key": TEMPLATE_KEY, "day_of_month": d, "shift": shift, "period": period,
-                "vacancy_name": vac_val, "substitute_name": sub_val
-            }
-            st.rerun()
-
-    # (3) 대근자: 룰 기반 + 그날 중복 제외 (조건 3, 4)
+    # (3) 대근자: 읽기 전용 표시
     row3 = st.columns([1] + [1]*len(days))
     row3[0].markdown("**대근자**")
     for i, d in enumerate(days):
         g = tmpl_map.get((d, shift, period))
-        key = (d, shift, period)
-        a = assign_map.get(key, {})
-        current_sub = a.get("substitute_name")
-        current_vac = a.get("vacancy_name")
-
         if not g:
-            row3[i+1].markdown("-")
+            row3[i+1].markdown("•")
             continue
+        a = assign_map.get((d, shift, period), {})
+        row3[i+1].markdown(a.get("substitute_name") or "")
 
-        cand_groups = substitute_candidate_groups(g, period)
-        candidates = members_of_groups(cand_groups)
+def preview_page():
+    st.header("미리보기")
 
-        used = set(subs_used_by_day.get(d, set()))
-        # 현재 셀의 값은 유지(편집 UX)
-        if current_sub:
-            used.discard(current_sub)
+    if st.button("입력 화면으로"):
+        st.session_state.mode = "input"
+        st.rerun()
 
-        filtered = [x for x in candidates if x not in used]
+    # preview에서는 최신 반영 위해 assignments 재로드
+    global assign_map
+    assign_map = load_assignments(TEMPLATE_KEY)
 
-        options = [""] + filtered
-        sub = row3[i+1].selectbox(
-            label=f"sub_{shift}_{period}_{d}",
-            options=options,
-            index=options.index(current_sub) if current_sub in options else 0,
-            label_visibility="collapsed"
-        )
-
-        sub_val = sub if sub != "" else None
-        vac_val = current_vac if current_vac else None
-
-        if sub_val != current_sub:
-            # 메모리상 중복셋 갱신 후 저장
-            if current_sub:
-                subs_used_by_day[d].discard(current_sub)
-            if sub_val:
-                subs_used_by_day[d].add(sub_val)
-
-            upsert_assignment(TEMPLATE_KEY, d, shift, period, vac_val, sub_val)
-            assign_map[key] = {
-                "template_key": TEMPLATE_KEY, "day_of_month": d, "shift": shift, "period": period,
-                "vacancy_name": vac_val, "substitute_name": sub_val
-            }
-            st.rerun()
-
+    render_block("T1", "day",   "T1 · 주간")
+    render_block("T2", "day",   "T2 · 주간")
+    render_block("T1", "night", "T1 · 야간")
+    render_block("T2", "night", "T2 · 야간")
 
 # =========================================================
-# 9) 화면 출력
+# 11) 화면 진입점
 # =========================================================
-render_block("T1", "day",   "T1 · 주간")
-render_block("T2", "day",   "T2 · 주간")
-render_block("T1", "night", "T1 · 야간")
-render_block("T2", "night", "T2 · 야간")
+if st.session_state.mode == "input":
+    input_page()
+else:
+    preview_page()
