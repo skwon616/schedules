@@ -75,6 +75,30 @@ def parse_select_from(text: str):
         cand |= GROUPS.get(k, set())
     return sorted(cand), keys
 
+def norm_shift(x: str) -> str:
+    s = (x or "").strip()
+    if s in ("Day", "D", "주간", "주"):
+        return "Day"
+    if s in ("Night", "N", "야간", "야"):
+        return "Night"
+    # 이미 Day/Night면 그대로
+    if s.lower().startswith("day"):
+        return "Day"
+    if s.lower().startswith("night"):
+        return "Night"
+    return s
+
+def norm_cat(x: str) -> str:
+    s = (x or "").strip()
+    # 포함 매칭으로 튼튼하게
+    if "근무" in s:
+        return "근무자"
+    if "결원" in s or "휴가" in s:
+        return "결원"
+    if "대근" in s or "대체" in s:
+        return "대근자"
+    return s
+
 # =========================================================
 # 2) DB helpers
 # =========================================================
@@ -126,8 +150,8 @@ def seed_from_excel(excel_df: pd.DataFrame):
     payload = []
     for i in range(len(excel_df)):
         team = teams.iat[i].strip()
-        shift_type = norm_shift(shifts.iat[i])
-        category = norm_cat(cats.iat[i])   # ✅ 핵심
+        shift_type = norm_shift(str(shifts.iat[i]))
+        category = norm_cat(str(cats.iat[i]))
 
         for dc in date_cols:
             v = excel_df.at[i, dc]
@@ -159,7 +183,9 @@ if db_df.empty:
         except Exception as e:
             st.error(f"초기 적재 실패: {e}")
     st.stop()
-
+    
+db_df["shift_type"] = db_df["shift_type"].apply(norm_shift)
+db_df["category"] = db_df["category"].apply(norm_cat)
 # =========================================================
 # 5) 화면용 데이터 구성
 # =========================================================
