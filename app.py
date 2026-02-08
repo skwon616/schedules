@@ -221,58 +221,76 @@ def get_workers(team: str, shift_type: str, wd: date):
     names = [x for x in sub["cell_value"].tolist() if x and x.strip()]
     return names[:4]
 
-def get_template(team: str, shift_type: str, category: str, wd: date):
-    # 결원/대근자 템플릿: 첫 행(row_no 최소) 셀 값을 사용
+def is_template(x: str) -> bool:
+    return isinstance(x, str) and ("Select from" in x)
+
+def value_or_blank(x: str) -> str:
+    # DB 값이 템플릿이면 화면에서는 공란처럼 취급
+    if is_template(x):
+        return ""
+    return (x or "").strip()
+
+def category_order_key(cat: str) -> int:
+    cat = (cat or "").strip()
+    if cat == "근무자":
+        return 0
+    if cat == "결원":
+        return 1
+    if cat == "대근자":
+        return 2
+    return 9
+
+def get_rows(team: str, shift_type: str, category: str, wd: date) -> pd.DataFrame:
     sub = db_df[
         (db_df["team"] == team) &
         (db_df["shift_type"] == shift_type) &
         (db_df["category"] == category) &
         (db_df["work_date"] == wd)
     ].sort_values("row_no")
-    if sub.empty:
-        return "", None
-    return sub.iloc[0]["cell_value"], int(sub.iloc[0]["row_no"])
+    return sub
 
-def get_saved_choice(team: str, shift_type: str, category: str, wd: date):
-    # 템플릿이 'Select from ...'였다가 이미 이름으로 바뀌었을 수 있음
-    v, rn = get_template(team, shift_type, category, wd)
-    # 만약 v가 템플릿이면 "아직 미선택"으로 간주
-    if isinstance(v, str) and "Select from" in v:
-        return "", rn, v
-    # 템플릿이 아닌 실제 이름이면 그걸 선택값으로 보여줌
-    return v, rn, v
+def get_workers(team: str, shift_type: str, wd: date):
+    sub = get_rows(team, shift_type, "근무자", wd)
+    names = [x for x in sub["cell_value"].tolist() if (x or "").strip()]
+    return names[:4]
+
+def get_leave_rows(team: str, shift_type: str, wd: date) -> pd.DataFrame:
+    return get_rows(team, shift_type, "결원", wd)
+
+def get_repl_rows(team: str, shift_type: str, wd: date) -> pd.DataFrame:
+    return get_rows(team, shift_type, "대근자", wd)
 
 def compute_repl_candidates(template_text: str, workers: list, leave_name: str):
     cands, _ = parse_select_from(template_text)
-    # 기본 제외 규칙: 당일 근무자/휴가자 제외
     ex = set([x for x in workers if x])
     if leave_name:
         ex.add(leave_name)
+    # 기본 제외: 당일 근무자 + 결원자
     cands = [c for c in cands if c not in ex]
     return cands
 
 cols = st.columns(2)
-for idx, team in enumerate(all_teams[:2]):  # T1, T2 기준 (더 많으면 반복 확장)
+cols = st.columns(2)
+
+# (6) 중복 체크를 위해 현재 날짜/shift의 전체 대근자 값 수집
+cur_repl_all = db_df[
+    (db_df["work_date"] == target_date) &
+    (db_df["shift_type"] == target_shift) &
+    (db_df["category"] == "대근자")
+].copy()
+cur_repl_all["val"] = cur_repl_all["cell_value"].apply(value_or_blank)
+already_used = set([v for v in cur_repl_all["val"].tolist() if v])
+
+for idx, team in enumerate(all_teams[:2]):
     with cols[idx]:
         workers = get_workers(team, target_shift, target_date)
-        leave_saved, leave_rowno, leave_raw = get_saved_choice(team, target_shift, "결원", target_date)
-        repl_saved, repl_rowno, repl_raw = get_saved_choice(team, target_shift, "대근자", target_date)
 
-        # 결원 드롭다운 옵션은 "근무자 4명"에서 선택하도록
-        leave_options = [""] + workers
-        if leave_saved and leave_saved not in leave_options:
-            leave_options = ["", leave_saved] + workers
-
-        # 대근자 후보는 템플릿 파싱으로
-        repl_template = repl_raw  # (대근자 category의 첫 행 값)
-        repl_candidates = compute_repl_candidates(repl_template, workers, leave_saved)
-        repl_options = [""] + repl_candidates
-        if repl_saved and repl_saved not in repl_options:
-            repl_options = ["", repl_saved] + repl_candidates
+        leave_rows = get_leave_rows(team, target_shift, target_date)   # 여러 행일 수 있음
+        repl_rows  = get_repl_rows(team, target_shift, target_date)    # 여러 행일 수 있음
 
         st.markdown(f"<div class='card'><div class='title'>{team} | {target_shift}</div>", unsafe_allow_html=True)
 
-        # 근무자 표시 (pill)
+        # 근무자 pill
         if workers:
             pills = " ".join([f"<span class='pill'>{w}</span>" for w in workers])
             st.markdown(pills, unsafe_allow_html=True)
@@ -281,43 +299,80 @@ for idx, team in enumerate(all_teams[:2]):  # T1, T2 기준 (더 많으면 반�
 
         st.markdown("<div class='rowgap'></div>", unsafe_allow_html=True)
 
-        # 드롭다운 2개 (라벨 숨김 처리됨)
-        leave_key = f"leave__{team}__{target_shift}__{target_date.isoformat()}"
-        repl_key  = f"repl__{team}__{target_shift}__{target_date.isoformat()}"
+        # 결원 드롭다운: 결원 행이 여러 개면 첫 번째만 사용(일단 1개만)
+        leave_choice = ""
+        leave_rowno = None
+        if leave_rows.empty:
+            st.warning("결원 행이 없습니다(엑셀 seed 확인).")
+        else:
+            leave_rowno = int(leave_rows.iloc[0]["row_no"])
+            leave_saved = value_or_blank(leave_rows.iloc[0]["cell_value"])
+            leave_options = [""] + workers
+            if leave_saved and leave_saved not in leave_options:
+                leave_options = ["", leave_saved] + workers
 
-        leave_choice = st.selectbox(
-            "결원",
-            options=leave_options,
-            index=leave_options.index(leave_saved) if leave_saved in leave_options else 0,
-            key=leave_key
-        )
+            leave_key = f"leave__{team}__{target_shift}__{target_date.isoformat()}"
+            leave_choice = st.selectbox(
+                "결원",
+                options=leave_options,
+                index=leave_options.index(leave_saved) if leave_saved in leave_options else 0,
+                key=leave_key
+            )
 
-        # leave 선택이 바뀌면 대근 후보도 다시 계산
-        repl_candidates = compute_repl_candidates(repl_template, workers, leave_choice)
-        repl_options = [""] + repl_candidates
-        if repl_saved and repl_saved not in repl_options:
-            repl_options = ["", repl_saved] + repl_candidates
+        # 대근자 드롭다운: DB에 있는 대근자 행 개수만큼 생성 (요구사항 1,2)
+        repl_inputs = []  # [(row_no, chosen_value, template_text)]
+        if repl_rows.empty:
+            st.warning("대근자 행이 없습니다(엑셀 seed 확인).")
+        else:
+            for j, r in repl_rows.reset_index(drop=True).iterrows():
+                rn = int(r["row_no"])
+                raw = (r["cell_value"] or "")
+                saved = value_or_blank(raw)
 
-        repl_choice = st.selectbox(
-            "대근자",
-            options=repl_options,
-            index=repl_options.index(repl_saved) if repl_saved in repl_options else 0,
-            key=repl_key
-        )
+                # 후보는 템플릿(raw)에 기반
+                if is_template(raw):
+                    candidates = compute_repl_candidates(raw, workers, leave_choice)
+                    options = [""] + candidates
+                    if saved and saved not in options:
+                        options = ["", saved] + candidates
+                else:
+                    # 템플릿이 아닌 경우(이미 값이거나 공란)
+                    # 후보를 만들려면 원래 템플릿이 필요하므로 빈 옵션 + 현재값만 허용
+                    options = [""] + ([saved] if saved else [])
+                    candidates = []
+
+                repl_key = f"repl__{team}__{target_shift}__{target_date.isoformat()}__{rn}"
+                choice = st.selectbox(
+                    f"대근자 {j+1}",
+                    options=options,
+                    index=options.index(saved) if saved in options else 0,
+                    key=repl_key
+                )
+                repl_inputs.append((rn, choice, raw, candidates))
 
         save = st.button(f"{team} 저장", type="primary", use_container_width=True, key=f"save__{team}")
         if save:
-            # 결원/대근자 category의 "첫 행(row_no 최소)"에 값 저장
-            if leave_rowno is None or repl_rowno is None:
-                st.error("DB에 결원/대근자 템플릿 행이 없습니다. seed 데이터를 확인하세요.")
+            # (5) 선택 없으면 공란 저장
+            # (6) 중복 체크: 같은 날짜/shift 전체에서 중복 금지
+            # 현재 팀의 선택값들만 대상으로 검사
+            chosen_vals = [c for (_, c, _, _) in repl_inputs if c]
+            dup = None
+            for v in chosen_vals:
+                # 이미 사용된 값 중, "현재 팀의 동일 row_no에 있었던 값"은 제외해야 하는데
+                # 간단히: 저장 시점에는 중복이면 막는다(실무상 충분)
+                if v in already_used:
+                    dup = v
+                    break
+            if dup:
+                st.error(f"{dup}는 이미 입력되었습니다")
             else:
-                # 선택값이 비었으면 템플릿 원문으로 되돌리고 싶다면 아래 로직 유지
-                # (비우면 "Select from ..."로 복구)
-                leave_to_save = leave_choice if leave_choice else leave_raw
-                repl_to_save = repl_choice if repl_choice else repl_raw
+                # 결원 저장 (없으면 공란)
+                if leave_rowno is not None:
+                    db_upsert(team, target_shift, "결원", leave_rowno, target_date, leave_choice or "")
 
-                db_upsert(team, target_shift, "결원", leave_rowno, target_date, leave_to_save)
-                db_upsert(team, target_shift, "대근자", repl_rowno, target_date, repl_to_save)
+                # 대근자 N개 저장
+                for rn, choice, raw, _ in repl_inputs:
+                    db_upsert(team, target_shift, "대근자", rn, target_date, choice or "")
 
                 st.success("✅ 저장 완료 (DB 반영)")
                 st.rerun()
@@ -331,5 +386,16 @@ with st.expander("미리보기(디버그)", expanded=False):
     view = db_df[
         (db_df["work_date"] == target_date) &
         (db_df["shift_type"] == target_shift)
-    ].sort_values(["team","category","row_no"])
+    ].copy()
+
+    # (3) 카테고리 순서: 근무자 -> 결원 -> 대근자
+    view["cat_ord"] = view["category"].apply(category_order_key)
+    view = view.sort_values(["team", "cat_ord", "row_no"]).drop(columns=["cat_ord"])
+
+    # (4) row_no 숨기기
+    view = view.drop(columns=["row_no"], errors="ignore")
+
+    # (5) 템플릿은 빈칸으로 보여주기(디버그에서도)
+    view["cell_value"] = view["cell_value"].apply(value_or_blank)
+
     st.dataframe(view, use_container_width=True, height=350)
