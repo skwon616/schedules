@@ -106,67 +106,44 @@ def db_upsert(team: str, shift_type: str, category: str, row_no: int, work_date:
 # 3) 최초 1회 seed (schedule.xlsx 구조 기준)
 # =========================================================
 def seed_from_excel(excel_df: pd.DataFrame):
-    # schedule.xlsx 컬럼: 관제소, 근무형태, 구분, 날짜들...
-    if excel_df.shape[1] < 4:
-        raise ValueError("엑셀은 최소 4개 컬럼(관제소,근무형태,구분,날짜...)이 필요합니다.")
+    # 🔴 여기서 실제 엑셀 헤더명에 맞게만 바꿔주면 끝
+    COL_TEAM  = excel_df.columns[0]   # 예: "관제소"
+    COL_SHIFT = excel_df.columns[1]   # 예: "근무형태"
+    COL_CAT   = excel_df.columns[2]   # 예: "구분" (근무자/결원/대근자)
 
-    c_team = excel_df.columns[0]      # 관제소
-    c_shift = excel_df.columns[1]     # 근무형태
-    c_cat = excel_df.columns[2]       # 구분
+    teams  = excel_df[COL_TEAM].ffill().astype(str)
+    shifts = excel_df[COL_SHIFT].astype(str)
+    cats   = excel_df[COL_CAT].astype(str)
 
-    teams = excel_df[c_team].ffill().astype(str)
-    shifts = excel_df[c_shift].astype(str)
-    cats = excel_df[c_cat].astype(str)
-
-    # 날짜 컬럼 추출 (4번째 컬럼부터)
+    # 날짜 컬럼은 4번째부터
     date_cols = []
     for c in excel_df.columns[3:]:
-        if isinstance(c, pd.Timestamp):
-            date_cols.append(c)
-        else:
-            try:
-                _ = pd.to_datetime(c)
-                date_cols.append(c)
-            except:
-                pass
-    if not date_cols:
-        raise ValueError("날짜 컬럼을 찾지 못했습니다. (4번째 컬럼부터 헤더가 날짜여야 함)")
+        try:
+            date_cols.append(pd.to_datetime(c))
+        except:
+            pass
 
     payload = []
     for i in range(len(excel_df)):
-        team = str(teams.iat[i]).strip()
-        shift_type = str(shifts.iat[i]).strip()     # 주간/야간
-        category = str(cats.iat[i]).strip()         # 근무자/결원/대근자
+        team = teams.iat[i].strip()
+        shift_type = norm_shift(shifts.iat[i])
+        category = norm_cat(cats.iat[i])   # ✅ 핵심
 
         for dc in date_cols:
-            wd = pd.to_datetime(dc).date() if not isinstance(dc, pd.Timestamp) else dc.date()
             v = excel_df.at[i, dc]
-            v = "" if pd.isna(v) else str(v)
-
             payload.append({
                 "team": team,
                 "shift_type": shift_type,
                 "category": category,
-                "row_no": int(i),     # 엑셀 행 index를 row_no로
-                "work_date": wd.isoformat(),
-                "cell_value": v
+                "row_no": int(i),
+                "work_date": dc.date().isoformat(),
+                "cell_value": "" if pd.isna(v) else str(v)
             })
 
-    # 같은 키 중복 제거(안전)
-    dedup = {}
-    for r in payload:
-        k = (r["team"], r["shift_type"], r["category"], r["row_no"], r["work_date"])
-        dedup[k] = r
-    payload = list(dedup.values())
-
-    # 배치 upsert
-    BATCH = 800
-    for k in range(0, len(payload), BATCH):
-        sb.table(TABLE).upsert(
-            payload[k:k+BATCH],
-            on_conflict="team,shift_type,category,row_no,work_date"
-        ).execute()
-
+    sb.table("schedule_cells").upsert(
+        payload,
+        on_conflict="team,shift_type,category,row_no,work_date"
+    ).execute()
 # =========================================================
 # 4) Load DB or Seed
 # =========================================================
