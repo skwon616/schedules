@@ -3,9 +3,9 @@ import pandas as pd
 import streamlit as st
 from supabase import create_client
 
-SUPABASE_URL = "https://rorgbvylwdnpjfltxtvj.supabase.co"
+SUPABASE_URL = "https://rorgbvvlwdnpjfltxtvj.supabase.co"
 SUPABASE_KEY = "sb_publishable_xbWeDQ_2Ja8u2yQRFWFprg_dfLHyw4h"
-SUPABASE_SERVICE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJvcmdidnZsd2RucGpmbHR4dHZqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk2OTYyNTQsImV4cCI6MjA4NTI3MjI1NH0.JVMFHg9ZjW9HFdj3iv13W3Hn8btOd7S1AMPZUXx44MA"
+SUPABASE_SERVICE_KEY = "sb_secret_HZXy1kBPapoPjMTSsTWqQQ_mAHc8SO_"
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 TEMPLATE_KEY = "2026-02"
