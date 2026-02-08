@@ -136,8 +136,8 @@ def seed_from_excel(excel_df: pd.DataFrame):
     COL_CAT   = excel_df.columns[2]   # 예: "구분" (근무자/결원/대근자)
 
     teams  = excel_df[COL_TEAM].ffill().astype(str)
-    shifts = excel_df[COL_SHIFT].astype(str)
-    cats   = excel_df[COL_CAT].astype(str)
+    shifts = excel_df[c_shift].ffill().astype(str)
+    cats = excel_df[c_cat].ffill().astype(str)   # ← category도 병합 대비 ffill
 
     # 날짜 컬럼은 4번째부터
     date_cols = []
