@@ -150,6 +150,7 @@ def seed_from_excel(excel_df: pd.DataFrame):
     teams  = excel_df[c_team].ffill().astype(str)
     shifts = excel_df[c_shift].ffill().astype(str)
     cats   = excel_df[c_cat].ffill().astype(str)
+    category = norm_cat(cats.iat[i])
 
     # 날짜 컬럼 찾기
     date_cols = []
