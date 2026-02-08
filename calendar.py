@@ -3,8 +3,9 @@ import pandas as pd
 import streamlit as st
 from supabase import create_client
 
-SUPABASE_URL = st.secrets["https://rorgbvvlwdnpjfltxtvj.supabase.co"]
-SUPABASE_KEY = st.secrets["sb_publishable_xbWeDQ_2Ja8u2yQRFWFprg_dfLHyw4h"]  # seed는 service key 권장
+SUPABASE_URL = st.secrets["SUPABASE_URL"]
+SUPABASE_KEY = st.secrets["SUPABASE_KEY"]              # 일반용
+SUPABASE_SERVICE_KEY = st.secrets["SUPABASE_SERVICE_KEY"] 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 TEMPLATE_KEY = "2026-02"
